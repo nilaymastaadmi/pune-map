@@ -1,6 +1,6 @@
 // Pune Map service worker — offline app shell + library cache, runtime tile cache.
 // Bump CACHE_VERSION whenever index.html or assets change to force an update.
-const CACHE_VERSION = 'pune-map-v1';
+const CACHE_VERSION = 'pune-map-v2';
 const SHELL_CACHE = CACHE_VERSION + '-shell';
 const TILE_CACHE = CACHE_VERSION + '-tiles';
 const TILE_LIMIT = 600; // cap cached tiles so storage doesn't balloon on old phones
@@ -42,7 +42,7 @@ self.addEventListener('activate', (e) => {
 });
 
 function isTile(url) {
-  return /tile\.openstreetmap\.org/.test(url);
+  return /tile\.openstreetmap\.org|basemaps\.cartocdn\.com/.test(url);
 }
 
 async function trimCache(name, max) {

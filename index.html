@@ -33,6 +33,18 @@
     --text: #e8e8ea;
     --muted: #9a9aa8;
     --border: #3a3a46;
+    --chip: #3a3a48;
+    --chip-hover: #474758;
+  }
+  body.light {
+    --bg: #eef0f4;
+    --panel: #ffffff;
+    --panel-2: #f3f4f8;
+    --text: #1b1b22;
+    --muted: #6b6b78;
+    --border: #d9dae1;
+    --chip: #e7e8ef;
+    --chip-hover: #dcdde6;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -116,17 +128,66 @@
   }
   .leaflet-popup-content button.secondary { background: #555; }
   .leaflet-popup-content input { width: 100%; padding: 5px; margin-top: 4px; box-sizing: border-box; }
+
+  /* ---- Sidebar as a slide-away drawer (overlays the map, no reflow) ---- */
+  body { display: block; position: relative; color: var(--text); }
+  #map { position: absolute; inset: 0; width: 100%; height: 100vh; flex: none; }
+  #sidebar {
+    position: fixed; top: 0; right: 0; height: 100vh; width: min(330px, 86vw);
+    transition: transform .25s ease; z-index: 1000;
+  }
+  body.panel-hidden #sidebar { transform: translateX(105%); }
+
+  /* floating button to reopen the panel (only shown when hidden) */
+  #panel-open {
+    position: fixed; top: 12px; right: 12px; z-index: 1100; display: none;
+    width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 20px; cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  }
+  body.panel-hidden #panel-open { display: flex; align-items: center; justify-content: center; }
+
+  /* header row with theme + close buttons */
+  .head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .head-btns { display: flex; gap: 6px; flex-shrink: 0; }
+  .head-btns button {
+    width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--border);
+    background: var(--chip); color: var(--text); cursor: pointer; font-size: 15px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .head-btns button:hover { background: var(--chip-hover); }
+
+  /* make hard-coded colors theme-aware */
+  .toolbar button { color: var(--text); }
+  .toolbar button:hover { background: var(--chip); }
+  .stats b { color: var(--text); }
+  .item .actions button { background: var(--chip); color: var(--text); }
+  .item .actions button:hover { background: var(--chip-hover); }
+  .item .actions button.nav { background: var(--accent); color: #fff; }
+  .item .actions button.del { background: transparent; color: var(--checkpoint); }
+  .footer button { color: var(--text); }
+  .footer button:hover { background: var(--chip); }
+  body.light #map { background: #e8eaf0; }
 </style>
 </head>
 <body>
 
 <div id="map"></div>
 <div class="hint" id="hint"></div>
+<button id="panel-open" title="Show panel">☰</button>
 
 <div id="sidebar">
   <header>
-    <h1>🗺️ My Pune Map</h1>
-    <p>Track roads you've taken · save places · route in Maps</p>
+    <div class="head-row">
+      <div>
+        <h1>🗺️ My Pune Map</h1>
+        <p>Track roads you've taken · save places · route in Maps</p>
+      </div>
+      <div class="head-btns">
+        <button id="btn-theme" title="Toggle light / dark">🌙</button>
+        <button id="btn-close-panel" title="Hide panel">✕</button>
+      </div>
+    </div>
   </header>
 
   <div class="toolbar">
@@ -167,11 +228,13 @@
   <div class="footer">
     <button id="btn-export">⬇ Export</button>
     <button id="btn-import">⬆ Import</button>
-    <button id="btn-locate">📍 Locate me</button>
+    <button id="btn-gpx">📥 GPX</button>
+    <button id="btn-locate">📍 Locate</button>
   </div>
 </div>
 
 <input type="file" id="file-input" accept=".json" style="display:none">
+<input type="file" id="gpx-input" accept=".gpx,application/gpx+xml,application/octet-stream" multiple style="display:none">
 
 <script>
 // ---------- State & storage ----------
@@ -194,12 +257,40 @@ const PUNE = [18.5204, 73.8567];
 // nodes — far lighter on old phones once you have lots of tracked roads.
 const map = L.map('map', { zoomControl: true, preferCanvas: true }).setView(PUNE, 13);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '© OpenStreetMap contributors',
-  updateWhenIdle: true,   // don't fetch tiles mid-pan — fewer requests, less jank
-  keepBuffer: 2           // smaller offscreen tile buffer = less memory
-}).addTo(map);
+// Theme-aware base maps (CARTO — free, no API key). updateWhenIdle/keepBuffer
+// keep tile work light on old hardware.
+const TILE_OPTS = {
+  maxZoom: 19, subdomains: 'abcd', updateWhenIdle: true, keepBuffer: 2,
+  attribution: '© OpenStreetMap contributors © CARTO'
+};
+const tileLayers = {
+  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', TILE_OPTS),
+  light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', TILE_OPTS)
+};
+let currentTiles = null;
+let theme = localStorage.getItem('pune-map-theme') || 'dark';
+
+function setTheme(t) {
+  theme = t;
+  document.body.classList.toggle('light', t === 'light');
+  if (currentTiles) map.removeLayer(currentTiles);
+  currentTiles = tileLayers[t] || tileLayers.dark;
+  currentTiles.addTo(map);
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = t === 'light' ? '☀️' : '🌙';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', t === 'light' ? '#eef0f4' : '#1e1e24');
+  localStorage.setItem('pune-map-theme', t);
+}
+
+// Slide-away panel
+const bodyEl = document.body;
+function setPanel(open) { bodyEl.classList.toggle('panel-hidden', !open); }
+
+// Recalculate map size on viewport changes (e.g. phone rotation) so tiles
+// always fill the screen.
+window.addEventListener('resize', () => map.invalidateSize());
+window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 200));
 
 // Layer registries: id -> leaflet layer
 const roadLayers = {};
@@ -348,6 +439,7 @@ function setMode(m) {
 function showHint(t) { hint.textContent = t; hint.style.display = 'block'; }
 
 map.on('click', (e) => {
+  setPanel(false); // tapping the map dismisses the panel
   if (mode === 'checkpoint') {
     const name = prompt('Checkpoint name:', 'Checkpoint ' + (data.checkpoints.length + 1));
     if (name !== null) {
@@ -376,6 +468,10 @@ modeBtns.edit.onclick = () => setMode(mode === 'edit' ? null : 'edit');
 modeBtns.checkpoint.onclick = () => setMode(mode === 'checkpoint' ? null : 'checkpoint');
 modeBtns.home.onclick = () => setMode(mode === 'home' ? null : 'home');
 modeBtns.work.onclick = () => setMode(mode === 'work' ? null : 'work');
+
+document.getElementById('btn-theme').onclick = () => setTheme(theme === 'light' ? 'dark' : 'light');
+document.getElementById('btn-close-panel').onclick = () => setPanel(false);
+document.getElementById('panel-open').onclick = () => setPanel(true);
 
 document.getElementById('btn-route').onclick = () => {
   const home = data.places.find(p => p.type === 'home');
@@ -506,6 +602,68 @@ document.getElementById('file-input').onchange = (ev) => {
   ev.target.value = '';
 };
 
+// ---------- GPX import (from background GPS-logger apps) ----------
+// GPSLogger (Android) and Open GPX Tracker (iOS) both emit standard GPX 1.1,
+// so the same parser handles tracks from either platform.
+document.getElementById('btn-gpx').onclick = () => document.getElementById('gpx-input').click();
+document.getElementById('gpx-input').onchange = (ev) => {
+  const files = Array.from(ev.target.files || []);
+  ev.target.value = '';
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = () => importGPX(reader.result, file.name);
+    reader.readAsText(file);
+  });
+};
+
+function importGPX(text, filename) {
+  const xml = new DOMParser().parseFromString(text, 'application/xml');
+  if (xml.getElementsByTagName('parsererror').length) { alert("That doesn't look like a valid GPX file."); return; }
+  const base = (filename || 'GPX').replace(/\.gpx$/i, '');
+  const added = [];
+
+  const collect = (nodes) => {
+    const pts = [];
+    for (const n of nodes) {
+      const la = parseFloat(n.getAttribute('lat')), lo = parseFloat(n.getAttribute('lon'));
+      if (!isNaN(la) && !isNaN(lo)) pts.push([la, lo]);
+    }
+    return pts;
+  };
+  const makeRoad = (pts, name, timeStr) => {
+    if (pts.length < 2) return;
+    const road = {
+      id: uid(), name: name || base, latlngs: pts, color: '#34c759',
+      date: (timeStr && timeStr.slice(0, 10)) || new Date().toISOString().slice(0, 10),
+      tracked: true
+    };
+    data.roads.push(road); addRoadLayer(road); added.push(road);
+  };
+
+  const trks = xml.getElementsByTagName('trk');
+  if (trks.length) {
+    for (let i = 0; i < trks.length; i++) {
+      const trk = trks[i];
+      const nm = trk.getElementsByTagName('name')[0];
+      const t = trk.getElementsByTagName('time')[0];
+      makeRoad(collect(trk.getElementsByTagName('trkpt')),
+        (nm && nm.textContent.trim()) || (trks.length > 1 ? `${base} (${i + 1})` : base),
+        t && t.textContent);
+    }
+  } else {
+    let pts = collect(xml.getElementsByTagName('rtept'));
+    if (pts.length < 2) pts = collect(xml.getElementsByTagName('wpt'));
+    makeRoad(pts, base);
+  }
+
+  if (!added.length) { alert('No track points found in that GPX file.'); return; }
+  save();
+  const group = L.featureGroup(added.map(r => roadLayers[r.id]));
+  map.fitBounds(group.getBounds(), { padding: [40, 40] });
+  const km = added.reduce((s, r) => s + roadKm(r), 0);
+  alert(`Imported ${added.length} track${added.length > 1 ? 's' : ''} · ${km.toFixed(2)} km total.`);
+}
+
 // ---------- Sidebar lists ----------
 function render() {
   document.getElementById('stat-roads').textContent = data.roads.length;
@@ -608,6 +766,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // ---------- Init ----------
+setTheme(theme);
 reloadAll();
 render();
 </script>
